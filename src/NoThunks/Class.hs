@@ -47,6 +47,8 @@ import GHC.TypeLits
 
 import Data.ByteString.Short (ShortByteString)
 import Data.Foldable (toList)
+import Data.HashMap.Strict (HashMap)
+import Data.HashSet (HashSet)
 import Data.Int
 import Data.IntMap (IntMap)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -57,12 +59,17 @@ import Data.Set (Set)
 import Data.Time
 import Data.Void (Void)
 import Data.Word
+import GHC.ForeignPtr
+import GHC.Stable
 import GHC.Stack
+import GHC.Ptr
 import Numeric.Natural
 
 import qualified Data.ByteString               as BS.Strict
 import qualified Data.ByteString.Lazy          as BS.Lazy
 import qualified Data.ByteString.Lazy.Internal as BS.Lazy.Internal
+import qualified Data.HashMap.Strict           as HashMap
+import qualified Data.HashSet                  as HashSet
 import qualified Data.IntMap                   as IntMap
 import qualified Data.Map                      as Map
 import qualified Data.Set                      as Set
@@ -582,6 +589,39 @@ instance NoThunks a => NoThunks (NonEmpty a)
 
 instance (NoThunks a, NoThunks b) => NoThunks (Either a b)
 
+{------------------------------------------------------------------------------
+  Pointers
+
+  We will consider three types of pointers: @Ptr@, @StablePtr@ and @ForeignPtr@.
+------------------------------------------------------------------------------}
+
+-- | Given a pointer to a value of type @a@, it only stores a memory address to
+-- a region in the memory that should contain said value, but whether the
+-- underlying value is or not a thunk is not known just from a pointer. Because
+-- of that, we can just check if the value is in WHNF.
+deriving via OnlyCheckWhnf (Ptr a) instance Typeable a => NoThunks (Ptr a)
+
+-- | @ForeignPtr@s are not usually meant to be dereferenced in Haskell as they
+-- are opaque pointers to data managed in other language. What was said for
+-- @Ptr@ can be applied here even more strongly as we don't have (or except from
+-- very specifically tailored specific cases) means of looking into the pointer.
+-- Because of that, we can just check if the value is in WHNF.
+deriving via OnlyCheckWhnf (ForeignPtr a)
+  instance Typeable a
+  => NoThunks (ForeignPtr a)
+
+-- | In the case of @StablePtr@s, these are pointers to Haskell values so
+-- they can contain a reference to an unevaluated thunk. In order to check this,
+-- we dereference the value that it contains and check for thunks inside it.
+--
+-- @StablePtr@s can be casted into @Ptr@s that are then potentially manipulable
+-- and can be casted to other types or pointed to other locations. It should be
+-- the programmer's responsibility to ensure that those casts are correct and not
+-- preserving this invariant can lead to segmentation faults or corrupted data.
+instance NoThunks a => NoThunks (StablePtr a) where
+  showTypeOf _ = "StablePtr"
+  wNoThunks ctxt s = noThunks ctxt =<< deRefStablePtr s
+
 {-------------------------------------------------------------------------------
   Spine-strict container types
 
@@ -603,6 +643,14 @@ instance NoThunks a => NoThunks (Set a) where
 instance NoThunks a => NoThunks (IntMap a) where
   showTypeOf _   = "IntMap"
   wNoThunks ctxt = noThunksInValues ctxt . IntMap.toList
+
+instance (NoThunks k, NoThunks v) => NoThunks (HashMap k v) where
+  showTypeOf _   = "HashMap"
+  wNoThunks ctxt = noThunksInKeysAndValues ctxt . HashMap.toList
+
+instance NoThunks v => NoThunks (HashSet v) where
+  showTypeOf _   = "HashSet"
+  wNoThunks ctxt = noThunksInValues ctxt . HashSet.toList
 
 {-------------------------------------------------------------------------------
   Vector
